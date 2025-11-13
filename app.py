@@ -138,6 +138,117 @@ def save_and_open(html_text: str, symbol: str):
     webbrowser.open("file://" + os.path.abspath(fname))
 
 
+app = Flask(__name__)
+
+def load_symbols():
+    symbols = []
+    try:
+        with open("stocks.csv", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row:
+                    continue
+                sym = row[0].strip().upper()
+                if sym == "" or sym in ("SYMBOL", "TICKER"):
+                    continue
+                if sym not in symbols:
+                    symbols.append(sym)
+    except FileNotFoundError:
+        symbols = ["AAPL", "MSFT", "GOOGL"]
+    return symbols
+
+STOCK_SYMBOLS = load_symbols()
+
+def web_fetch_data(symbol: str, fn: str) -> dict:
+    params = {
+        "function": fn,
+        "symbol": symbol,
+        "apikey": API_KEY,
+        "datatype": "json",
+        "outputsize": "full",
+    }
+    r = requests.get(API_URL, params=params, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Error fetching data: {r.status_code}")
+    data = r.json()
+    if "Error Message" in data:
+        raise RuntimeError(f"API Error: {data['Error Message']}")
+    if "Note" in data:
+        raise RuntimeError("API Note: rate limited. Please wait ~1 minute and try again.")
+    return data
+
+def web_parse_close_series(data: dict, fn: str):
+    key = series_key_for(fn)
+    if key not in data:
+        raise RuntimeError(f"Unexpected API response. Missing key: {key}")
+    rows = []
+    for k, v in data[key].items():
+        ts = datetime.strptime(k, "%Y-%m-%d")
+        close_str = v.get("4. close", None)
+        if close_str is None:
+            continue
+        try:
+            close_val = float(close_str)
+            rows.append((ts, close_val))
+        except ValueError:
+            continue
+    rows.sort(key=lambda x: x[0])
+    return rows
+
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    error = ""
+    chart_svg = None
+    symbol = "AAPL"
+    chart_type = "line"
+    time_series = "DAILY"
+    start_date = "2023-01-01"
+    end_date = datetime.today().strftime("%Y-%m-%d")
+
+    if request.method == "POST":
+        symbol = request.form.get("symbol", "").upper()
+        chart_type = request.form.get("chart_type", "line").lower()
+        time_series = request.form.get("time_series", "DAILY").upper()
+        start_date = request.form.get("start_date", start_date)
+        end_date = request.form.get("end_date", end_date)
+
+        if not symbol:
+            error = "Please choose a stock symbol."
+        elif not validate_date(start_date) or not validate_date(end_date):
+            error = "Please use dates in YYYY-MM-DD format."
+        elif start_date > end_date:
+            error = "Start date must be before end date."
+        elif chart_type not in ["line", "bar"]:
+            error = "Chart type must be line or bar."
+        elif time_series not in ["DAILY", "WEEKLY", "MONTHLY"]:
+            error = "Time series must be daily, weekly, or monthly."
+        else:
+            try:
+                fn = function_for(time_series)
+                data = web_fetch_data(symbol, fn)
+                rows = web_parse_close_series(data, fn)
+                rows = filter_range(rows, to_date(start_date), to_date(end_date))
+                if not rows:
+                    error = "No data in that date range."
+                else:
+                    chart_svg = make_chart(symbol, time_series.title(), chart_type, rows)
+            except Exception as e:
+                error = str(e)
+
+    return render_template(
+        "index.html",
+        symbols=STOCK_SYMBOLS,
+        chart_svg=chart_svg,
+        error=error,
+        symbol=symbol,
+        chart_type=chart_type,
+        time_series=time_series,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
 
 def main():
     print("=== Stock Data Visualizer ===")
